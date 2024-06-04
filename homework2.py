@@ -7,8 +7,6 @@ import os
 import json
 import nltk
 from sklearn.preprocessing import OneHotEncoder
-from gensim.models import KeyedVectors
-import matplotlib.pyplot as plt
 
 nltk.download('punkt')
 nltk.download('averaged_perceptron_tagger')
@@ -17,105 +15,134 @@ nltk.download('averaged_perceptron_tagger')
 with open('text.txt', 'r', encoding='utf-8') as f:
     corpus = f.readlines()
 
-# 加载预训练的词嵌入模型（例如Word2Vec或GloVe）
-word_vectors = KeyedVectors.load_word2vec_format('path_to_pretrained_embeddings/GoogleNews-vectors-negative300.bin', binary=True)
-
 # 读取词库文件
 with open('n_sort_delete_number.txt', 'r', encoding='utf-8') as f:
     vocab = f.read().splitlines()
 
-# 生成词汇到索引的映射
-vocab_to_index = {word: idx for idx, word in enumerate(vocab)}
+vocab = np.array(vocab).reshape(-1, 1)
 
-# 处理JSON文件
-json_folder = 'C:\\Users\\86135\\Desktop\\知识工程\\coref-dataset\\coref-dataset\\train'
-json_files = [os.path.join(json_folder, f) for f in os.listdir(json_folder) if f.endswith('.json')]
+encoder = OneHotEncoder()
+encoder.fit(vocab)
 
-json_data = []
-for i, json_file in enumerate(json_files):
-    with open(json_file, 'r', encoding='gbk') as f:
-        json_content = json.load(f)
-        json_data.append(json_content)
+train_json_folder = 'C:\\Users\\86135\\Desktop\\知识工程\\coref-dataset\\coref-dataset\\train'
+test_json_folder = 'C:\\Users\\86135\\Desktop\\知识工程\\coref-dataset\\coref-dataset\\test'
 
-# 生成特征向量和标签向量，并计算最长句子长度
-max_sentence_length = 0
-features = []
-labels = []
+train_json_files = [os.path.join(train_json_folder, f) for f in os.listdir(train_json_folder) if f.endswith('.json')]
+test_json_files = [os.path.join(test_json_folder, f) for f in os.listdir(test_json_folder) if f.endswith('.json')]
 
-for i, data in enumerate(json_data):
-    json_id = data["0"]["id"]
-    pronoun_index_front = data['pronoun']['indexFront']
-    pronoun_index_behind = data['pronoun']['indexBehind']
-    antecedent_index_front = data['0']['indexFront']
-    antecedent_index_behind = data['0']['indexBehind']
+def load_json_data(json_files):
+    json_data = []
+    for json_file in json_files:
+        with open(json_file, 'r', encoding='gbk') as f:
+            json_content = json.load(f)
+            json_data.append(json_content)
+    return json_data
 
-    # 获取句子并提取词汇
-    for line in corpus:
-        if json_id in line:
-            sentence = line.strip().split(" ", 1)[1]
-            break
+train_json_data = load_json_data(train_json_files)
+test_json_data = load_json_data(test_json_files)
 
-    words_before_pronoun = sentence[:pronoun_index_front].split()
-    words_after_pronoun = sentence[pronoun_index_behind:].split()
-    sentence_length = len(words_before_pronoun) + len(words_after_pronoun)
-    max_sentence_length = max(max_sentence_length, sentence_length)
+def process_data(json_data, corpus, pos_tags):
+    features = []
+    labels = []
+    max_sentence_length = 0
 
-# 生成特征向量和标签向量
-for i, data in enumerate(json_data):
-    json_id = data["0"]["id"]
-    pronoun_index_front = data['pronoun']['indexFront']
-    pronoun_index_behind = data['pronoun']['indexBehind']
-    antecedent_index_front = data['0']['indexFront']
-    antecedent_index_behind = data['0']['indexBehind']
+    for data in json_data:
+        json_id = data["0"]["id"]
+        pronoun_index_front = data['pronoun']['indexFront']
+        pronoun_index_behind = data['pronoun']['indexBehind']
+        antecedent_index_front = data['0']['indexFront']
+        antecedent_index_behind = data['0']['indexBehind']
 
-    # 获取句子并提取词汇
-    for line in corpus:
-        if json_id in line:
-            sentence = line.strip().split(" ", 1)[1]
-            break
+        # 获取句子并提取词汇
+        for line in corpus:
+            if json_id in line:
+                sentence = line.strip().split(" ", 1)[1]
+                break
 
-    words_before_pronoun = sentence[:pronoun_index_front].split()
-    words_after_pronoun = sentence[pronoun_index_behind:].split()
+        words_before_pronoun = sentence[:pronoun_index_front].split()
+        words_after_pronoun = sentence[pronoun_index_behind:].split()
+        sentence_length = len(words_before_pronoun) + len(words_after_pronoun)
+        max_sentence_length = max(max_sentence_length, sentence_length)
 
-    # 构造句子的特征向量
-    sentence_features = []
+        # 获取句子的词性
+        words_before_pronoun_pos = nltk.pos_tag(words_before_pronoun)
+        words_after_pronoun_pos = nltk.pos_tag(words_after_pronoun)
 
-    for word in words_before_pronoun + words_after_pronoun:
-        if word in word_vectors:
-            sentence_features.append(word_vectors[word])
-        else:
-            sentence_features.append(np.zeros(word_vectors.vector_size))
+        for word, pos in words_before_pronoun_pos:
+            pos_tags.add(pos)
 
-    # 补全特征向量使其与最长的句子等长
-    padding_length = max_sentence_length - len(sentence_features)
-    for _ in range(padding_length):
-        sentence_features.append(np.zeros(word_vectors.vector_size))
+        for word, pos in words_after_pronoun_pos:
+            pos_tags.add(pos)
 
-    # 构造句子的标签向量
-    sentence_labels = []
-    for j in range(len(words_before_pronoun) + len(words_after_pronoun)):
-        if (j >= antecedent_index_front and j < antecedent_index_behind) or (
-                j >= pronoun_index_front and j < pronoun_index_behind):
-            sentence_labels.append(1)
-        else:
-            sentence_labels.append(0)
+    pos_tags = {tag: idx for idx, tag in enumerate(pos_tags)}
 
-    # 补全标签向量使其与最长的句子等长
-    padding_length = max_sentence_length - len(sentence_labels)
-    for _ in range(padding_length):
-        sentence_labels.append(0)  # 对于填充部分，我们可以添加一个表示“非指代”的标签，即0
+    for data in json_data:
+        json_id = data["0"]["id"]
+        pronoun_index_front = data['pronoun']['indexFront']
+        pronoun_index_behind = data['pronoun']['indexBehind']
+        antecedent_index_front = data['0']['indexFront']
+        antecedent_index_behind = data['0']['indexBehind']
 
-    features.append(sentence_features)
-    labels.append(sentence_labels)
+        # 获取句子并提取词汇
+        for line in corpus:
+            if json_id in line:
+                sentence = line.strip().split(" ", 1)[1]
+                break
 
-# 将特征和标签转换为 numpy 数组
-features = np.array(features)
-labels = np.array(labels)
+        words_before_pronoun = sentence[:pronoun_index_front].split()
+        words_after_pronoun = sentence[pronoun_index_behind:].split()
 
-# 将数据划分为训练集和测试集
-split = int(0.8 * len(features))
-train_features, test_features = features[:split], features[split:]
-train_labels, test_labels = labels[:split], labels[split:]
+        # 构造句子的特征向量
+        sentence_features = []
+        sentence_labels = []
+
+        # 构造词性特征向量
+        for word, pos in nltk.pos_tag(words_before_pronoun):
+            pos_idx = pos_tags[pos]
+            one_hot_encoded = np.zeros(len(pos_tags), dtype=np.float32)
+            one_hot_encoded[pos_idx] = 1
+            sentence_features.append(one_hot_encoded)
+
+        for word, pos in nltk.pos_tag(words_after_pronoun):
+            pos_idx = pos_tags[pos]
+            one_hot_encoded = np.zeros(len(pos_tags), dtype=np.float32)
+            one_hot_encoded[pos_idx] = 1
+            sentence_features.append(one_hot_encoded)
+
+        # 补全特征向量使其与最长的句子等长
+        padding_length = max_sentence_length - len(sentence_features)
+        for _ in range(padding_length):
+            sentence_features.append(np.zeros(len(pos_tags), dtype=np.float32))
+
+        # 构造句子的标签向量
+        for j in range(len(words_before_pronoun) + len(words_after_pronoun)):
+            if (j >= antecedent_index_front and j < antecedent_index_behind) or (
+                    j >= pronoun_index_front and j < pronoun_index_behind):
+                sentence_labels.append(1)
+            else:
+                sentence_labels.append(0)
+
+        # 补全标签向量使其与最长的句子等长
+        padding_length = max_sentence_length - len(sentence_labels)
+        for _ in range(padding_length):
+            sentence_labels.append(0)  # 对于填充部分，我们可以添加一个表示“非指代”的标签，即0
+
+        features.append(sentence_features)
+        labels.append(sentence_labels)
+
+    return np.array(features), np.array(labels), max_sentence_length, pos_tags
+
+# 处理训练集和测试集
+train_features, train_labels, max_sentence_length_train, pos_tags_train = process_data(train_json_data, corpus, set())
+test_features, test_labels, max_sentence_length_test, pos_tags_test = process_data(test_json_data, corpus, set())
+
+# 确保两个数据集的最大句子长度和词性标记一致
+max_sentence_length = max(max_sentence_length_train, max_sentence_length_test)
+pos_tags = {tag: idx for idx, tag in enumerate(set(pos_tags_train).union(set(pos_tags_test)))}
+
+# 重新处理数据以确保一致性
+train_features, train_labels, _, _ = process_data(train_json_data, corpus, pos_tags)
+test_features, test_labels, _, _ = process_data(test_json_data, corpus, pos_tags)
 
 # 计算正负样本的权重
 pos_weight = torch.tensor((train_labels == 0).sum() / (train_labels == 1).sum())
@@ -138,19 +165,18 @@ test_loader = DataLoader(test_dataset, batch_size=batch_size, shuffle=False)
 class ComplexModel(nn.Module):
     def __init__(self, input_size, hidden_size):
         super(ComplexModel, self).__init__()
-        self.lstm = nn.LSTM(input_size, hidden_size, batch_first=True)
-        self.fc1 = nn.Linear(hidden_size, hidden_size)
+        self.fc1 = nn.Linear(input_size, hidden_size)
         self.relu = nn.ReLU()
-        self.fc2 = nn.Linear(hidden_size, 1)
+        self.fc2 = nn.Linear(hidden_size, hidden_size)
+        self.fc3 = nn.Linear(hidden_size, 1)
 
     def forward(self, x):
-        h_lstm, _ = self.lstm(x)
-        h_lstm = h_lstm[:, -1, :]  # 只取最后一个时间步的输出
-        x = self.fc1(h_lstm)
+        x = self.fc1(x)
         x = self.relu(x)
         x = self.fc2(x)
+        x = self.relu(x)
+        x = self.fc3(x)
         return torch.squeeze(x, -1)
-
 
 input_size = train_features_tensor.shape[2]
 hidden_size = 256  # 增加隐藏层大小
@@ -209,6 +235,7 @@ for epoch in range(num_epochs):
     print(f"Precision: {precision:.4f}, Recall: {recall:.4f}, F1 Score: {f1_score:.4f}")
 
 # 绘制训练损失曲线
+import matplotlib.pyplot as plt
 plt.plot(train_losses, label='Training loss')
 plt.xlabel('Epoch')
 plt.ylabel('Loss')
