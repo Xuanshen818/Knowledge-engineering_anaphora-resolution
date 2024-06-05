@@ -33,5 +33,5 @@ def check_empty_json_files(folder_path):
 
 
 # 使用示例
-folder_path = "C:\\Users\\86135\\Desktop\\知识工程\\coref-dataset\\coref-dataset\\test"
+folder_path = "C:\\Users\\86135\\Desktop\\知识工程\\coref-dataset\\coref-dataset\\validation"
 check_empty_json_files(folder_path)
