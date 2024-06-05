@@ -2,7 +2,6 @@ import os
 import json
 import nltk
 import numpy as np
-from sklearn.preprocessing import OneHotEncoder
 from torch.utils.data import DataLoader, TensorDataset
 import torch
 import torch.nn as nn
@@ -11,15 +10,6 @@ import matplotlib.pyplot as plt
 
 nltk.download('punkt')
 nltk.download('averaged_perceptron_tagger')
-
-# 读取词库文件
-with open('n_sort_delete_number.txt', 'r', encoding='utf-8') as f:
-    vocab = f.read().splitlines()
-
-vocab = np.array(vocab).reshape(-1, 1)
-
-encoder = OneHotEncoder()
-encoder.fit(vocab)
 
 # 读取 JSON 文件内容
 def read_json_files(json_folder):
@@ -64,9 +54,9 @@ for data in train_json_data + test_json_data + validation_json_data:
     words_before_pronoun_pos = nltk.pos_tag(words_before_pronoun)
     words_after_pronoun_pos = nltk.pos_tag(words_after_pronoun)
 
-    for word, pos in words_before_pronoun_pos:
+    for _, pos in words_before_pronoun_pos:
         pos_tags.add(pos)
-    for word, pos in words_after_pronoun_pos:
+    for _, pos in words_after_pronoun_pos:
         pos_tags.add(pos)
 
 pos_tags = {tag: idx for idx, tag in enumerate(pos_tags)}
@@ -93,41 +83,30 @@ def process_data(json_data, corpus, pos_tags, max_sentence_length):
 
         # 构造句子的特征向量
         sentence_features = []
-        sentence_labels = []
 
         # 构造词性特征向量
         for word, pos in nltk.pos_tag(words_before_pronoun):
             pos_idx = pos_tags[pos]
-            one_hot_encoded = np.zeros(len(pos_tags), dtype=np.float32)
-            one_hot_encoded[pos_idx] = 1
-            sentence_features.append(one_hot_encoded)
+            sentence_features.append(pos_idx)
 
         for word, pos in nltk.pos_tag(words_after_pronoun):
             pos_idx = pos_tags[pos]
-            one_hot_encoded = np.zeros(len(pos_tags), dtype=np.float32)
-            one_hot_encoded[pos_idx] = 1
-            sentence_features.append(one_hot_encoded)
+            sentence_features.append(pos_idx)
 
         # 补全特征向量使其与最长的句子等长
         padding_length = max_sentence_length - len(sentence_features)
-        for _ in range(padding_length):
-            sentence_features.append(np.zeros(len(pos_tags), dtype=np.float32))
-
-        # 构造句子的标签向量
-        for j in range(len(words_before_pronoun) + len(words_after_pronoun)):
-            if (j >= antecedent_index_front and j < antecedent_index_behind) or (
-                    j >= pronoun_index_front and j < pronoun_index_behind):
-                sentence_labels.append(1)
-            else:
-                sentence_labels.append(0)
-
-        # 补全标签向量使其与最长的句子等长
-        padding_length = max_sentence_length - len(sentence_labels)
-        for _ in range(padding_length):
-            sentence_labels.append(0)  # 对于填充部分，我们可以添加一个表示“非指代”的标签，即0
+        sentence_features += [0] * padding_length
 
         features.append(sentence_features)
-        labels.append(sentence_labels)
+
+        # 使用每个句子的最后一个标签作为整个句子的标签
+        sentence_label = 1 if (antecedent_index_front < len(words_before_pronoun) and
+                               antecedent_index_behind <= len(words_before_pronoun)) or (
+                                      pronoun_index_front < len(words_before_pronoun) and
+                                      pronoun_index_behind <= len(words_before_pronoun)) else 0
+
+        # 将每个句子的标签添加到标签列表中
+        labels.append(sentence_label)
 
     return np.array(features), np.array(labels)
 
@@ -136,15 +115,12 @@ train_features, train_labels = process_data(train_json_data, corpus, pos_tags, m
 test_features, test_labels = process_data(test_json_data, corpus, pos_tags, max_sentence_length)
 validation_features, validation_labels = process_data(validation_json_data, corpus, pos_tags, max_sentence_length)
 
-# 计算正负样本的权重
-pos_weight = torch.tensor((train_labels == 0).sum() / (train_labels == 1).sum())
-
-# 将数据转换为 PyTorch 张量
-train_features_tensor = torch.tensor(train_features, dtype=torch.float32)
+# 将特征和标签转换为PyTorch张量
+train_features_tensor = torch.tensor(train_features, dtype=torch.long)
 train_labels_tensor = torch.tensor(train_labels, dtype=torch.float32)
-test_features_tensor = torch.tensor(test_features, dtype=torch.float32)
+test_features_tensor = torch.tensor(test_features, dtype=torch.long)
 test_labels_tensor = torch.tensor(test_labels, dtype=torch.float32)
-validation_features_tensor = torch.tensor(validation_features, dtype=torch.float32)
+validation_features_tensor = torch.tensor(validation_features, dtype=torch.long)
 validation_labels_tensor = torch.tensor(validation_labels, dtype=torch.float32)
 
 # 创建 DataLoader
@@ -158,16 +134,20 @@ test_loader = DataLoader(test_dataset, batch_size=batch_size, shuffle=False)
 validation_dataset = TensorDataset(validation_features_tensor, validation_labels_tensor)
 validation_loader = DataLoader(validation_dataset, batch_size=batch_size, shuffle=False)
 
+
 # 定义神经网络模型
 class ComplexModel(nn.Module):
-    def __init__(self, input_size, hidden_size):
+    def __init__(self, input_size, hidden_size, max_sentence_length):
         super(ComplexModel, self).__init__()
-        self.fc1 = nn.Linear(input_size, hidden_size)
+        self.embedding = nn.Embedding(input_size, hidden_size)
+        self.fc1 = nn.Linear(hidden_size * max_sentence_length, hidden_size)
         self.relu = nn.ReLU()
         self.fc2 = nn.Linear(hidden_size, hidden_size)
         self.fc3 = nn.Linear(hidden_size, 1)
 
     def forward(self, x):
+        x = self.embedding(x)  # 嵌入词性特征
+        x = x.view(x.size(0), -1)  # 将嵌入的词性特征展平
         x = self.fc1(x)
         x = self.relu(x)
         x = self.fc2(x)
@@ -175,16 +155,19 @@ class ComplexModel(nn.Module):
         x = self.fc3(x)
         return torch.squeeze(x, -1)
 
-input_size = train_features_tensor.shape[2]
+input_size = len(pos_tags)  # 嵌入层输入尺寸等于词性标签数量
 hidden_size = 256
-model = ComplexModel(input_size, hidden_size)
+model = ComplexModel(input_size, hidden_size, max_sentence_length)
 
-criterion = nn.BCEWithLogitsLoss(pos_weight=pos_weight)
+# 损失函数和优化器
+criterion = nn.BCEWithLogitsLoss()
 optimizer = optim.Adam(model.parameters(), lr=0.0001)
 
+# 将模型移动到 GPU 上（如果可用）
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 model.to(device)
 
+# 训练模型
 num_epochs = 100
 train_losses = []
 validation_losses = []
@@ -202,42 +185,19 @@ for epoch in range(num_epochs):
     epoch_loss = running_loss / len(train_loader.dataset)
     train_losses.append(epoch_loss)
 
-    # 在验证集上计算损失
     model.eval()
-    validation_running_loss = 0.0
+    validation_loss = 0.0
     with torch.no_grad():
         for inputs, labels in validation_loader:
             inputs, labels = inputs.to(device), labels.to(device)
             outputs = model(inputs)
-            loss = criterion(outputs, labels)
-            validation_running_loss += loss.item() * inputs.size(0)
-    validation_epoch_loss = validation_running_loss / len(validation_loader.dataset)
+            validation_loss += criterion(outputs, labels).item() * inputs.size(0)
+    validation_epoch_loss = validation_loss / len(validation_loader.dataset)
     validation_losses.append(validation_epoch_loss)
 
-    correct = 0
-    total = 0
-    true_positive = 0
-    false_positive = 0
-    false_negative = 0
-    with torch.no_grad():
-        for inputs, labels in test_loader:
-            inputs, labels = inputs.to(device), labels.to(device)
-            outputs = model(inputs)
-            predicted = torch.round(torch.sigmoid(outputs))
-            total += labels.size(0)
-            correct += (predicted == labels).sum().item()
-            true_positive += ((predicted == 1) & (labels == 1)).sum().item()
-            false_positive += ((predicted == 1) & (labels == 0)).sum().item()
-            false_negative += ((predicted == 0) & (labels == 1)).sum().item()
+    print(f"Epoch {epoch + 1}/{num_epochs}, Training Loss: {epoch_loss:.4f}, Validation Loss: {validation_epoch_loss:.4f}")
 
-    accuracy = 100 * correct / total
-    precision = 0 if (true_positive + false_positive) == 0 else true_positive / (true_positive + false_positive)
-    recall = true_positive / (true_positive + false_negative)
-    f1_score = 2 * precision * recall / (precision + recall) if (precision + recall) != 0 else 0
-
-    print(f"Epoch {epoch + 1}/{num_epochs}, Loss: {epoch_loss:.4f}, Validation Loss: {validation_epoch_loss:.4f}, Accuracy on the test set: {accuracy:.2f}%")
-    print(f"Precision: {precision:.4f}, Recall: {recall:.4f}, F1 Score: {f1_score:.4f}")
-
+# 绘制训练和验证损失曲线
 plt.plot(train_losses, label='Training loss')
 plt.plot(validation_losses, label='Validation loss')
 plt.xlabel('Epoch')
@@ -246,4 +206,28 @@ plt.title('Training and Validation Loss')
 plt.legend()
 plt.show()
 
-torch.save(model.state_dict(), 'model.pth')
+# 在测试集上评估模型
+model.eval()
+correct = 0
+total = 0
+true_positive = 0
+false_positive = 0
+false_negative = 0
+with torch.no_grad():
+    for inputs, labels in test_loader:
+        inputs, labels = inputs.to(device), labels.to(device)
+        outputs = model(inputs)
+        predicted = torch.round(torch.sigmoid(outputs))
+        total += labels.size(0)
+        correct += (predicted == labels).sum().item()
+        true_positive += ((predicted == 1) & (labels == 1)).sum().item()
+        false_positive += ((predicted == 1) & (labels == 0)).sum().item()
+        false_negative += ((predicted == 0) & (labels == 1)).sum().item()
+
+accuracy = 100 * correct / total
+precision = 0 if (true_positive + false_positive) == 0 else true_positive / (true_positive + false_positive)
+recall = 0 if (true_positive + false_negative) == 0 else true_positive / (true_positive + false_negative)
+f1_score = 2 * precision * recall / (precision + recall) if (precision + recall) != 0 else 0
+
+print(f"Accuracy on the test set: {accuracy:.2f}%")
+print(f"Precision: {precision:.4f}, Recall: {recall:.4f}, F1 Score: {f1_score:.4f}")
